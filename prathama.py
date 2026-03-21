@@ -1,149 +1,107 @@
 #!/usr/bin/env python3
-"""Print CSV of all Śukla pakṣa prathamā dates in a given range."""
+"""
+From a start date, walk forward day by day until the saṃvatsara index changes.
+Emit one CSV row per civil day where tithi at sunrise is Śukla Prathamā (tithi 1).
+The second column is the civil date immediately before the next row’s date (empty on
+the last row).
+
+Default location is Mumbai; pass --city to use another entry from cities.json.
+"""
 
 import argparse
 import csv
-import json
 import sys
-import difflib
-import unicodedata
 from datetime import datetime, timedelta
-from pytz import timezone
 
-from panchanga import *
+from panchanga import Date, gregorian_to_jd, Place, tithi, masa, samvatsara
 
-FORMAT_TIME = lambda t: "%02d:%02d:%02d" % (t[0], t[1], t[2])
-SHUKLA_PRATHAMA = 1
-
-IAST_TO_ITRANS = [
-    ("ā", "aa"), ("ī", "ii"), ("ū", "uu"),
-    ("ṝ", "RRI"), ("ṛ", "Ri"),
-    ("ai", "ai"), ("au", "au"),
-    ("ṃ", "M"), ("ḥ", "H"),
-    ("ṅ", "~N"), ("ñ", "~n"),
-    ("ṭh", "Th"), ("ṭ", "T"),
-    ("ḍh", "Dh"), ("ḍ", "D"),
-    ("ṇ", "N"),
-    ("ś", "sh"), ("ṣ", "Sh"),
-    ("Ā", "Aa"), ("Ī", "Ii"), ("Ū", "Uu"),
-    ("Ṝ", "RRI"), ("Ṛ", "Ri"),
-    ("Ṃ", "M"), ("Ḥ", "H"),
-    ("Ṅ", "~N"), ("Ñ", "~n"),
-    ("Ṭh", "Th"), ("Ṭ", "T"),
-    ("Ḍh", "Dh"), ("Ḍ", "D"),
-    ("Ṇ", "N"),
-    ("Ś", "Sh"), ("Ṣ", "Sh"),
-]
+from cli import load_data, resolve_city, compute_tz_offset, parse_date
 
 
-def to_itrans(text):
-    text = unicodedata.normalize('NFC', text)
-    for iast, itrans in IAST_TO_ITRANS:
-        text = text.replace(iast, itrans)
-    return text
+def fmt_date(d):
+    return f"{d.day:02d}-{d.month:02d}-{d.year:04d}"
 
 
-def load_data():
-    with open("sanskrit_names.json") as f:
-        names = json.load(f)
-    with open("cities.json") as f:
-        cities = json.load(f)
-    return names, cities
+def date_add_one(d):
+    dt = datetime(d.year, d.month, d.day) + timedelta(days=1)
+    return Date(dt.year, dt.month, dt.day)
 
 
-def resolve_city(city_name, cities):
-    key = city_name.title()
-    if key in cities:
-        return key, cities[key]
-    for k in cities:
-        if k.lower() == city_name.lower():
-            return k, cities[k]
-    matches = difflib.get_close_matches(key, cities.keys(), n=5, cutoff=0.6)
-    if matches:
-        print(f"City '{city_name}' not found. Did you mean:", file=sys.stderr)
-        for m in matches:
-            print(f"  - {m}", file=sys.stderr)
-    else:
-        print(f"City '{city_name}' not found in database.", file=sys.stderr)
-    sys.exit(1)
-
-
-def parse_date(date_str):
-    try:
-        dt = datetime.strptime(date_str, "%d-%m-%Y")
-        return Date(dt.year, dt.month, dt.day)
-    except ValueError:
-        print(f"Invalid date format: '{date_str}'. Use DD-MM-YYYY.", file=sys.stderr)
-        sys.exit(1)
-
-
-def compute_tz_offset(city_info, date):
-    tz = timezone(city_info['timezone'])
-    dt = datetime(date.year, date.month, date.day)
-    return tz.utcoffset(dt, is_dst=True).total_seconds() / 3600.0
+def date_sub_one(d):
+    dt = datetime(d.year, d.month, d.day) - timedelta(days=1)
+    return Date(dt.year, dt.month, dt.day)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="List all Śukla pakṣa prathamā dates in a range (CSV)")
-    parser.add_argument("city", help="City name (e.g. Bangalore, Mumbai)")
-    parser.add_argument("from_date", help="Start date (DD-MM-YYYY)")
-    parser.add_argument("to_date", help="End date (DD-MM-YYYY)")
-    parser.add_argument("--itrans", action="store_true",
-                        help="Use ITRANS transliteration instead of IAST Unicode")
+        description="CSV of Śukla Prathamā dates from START until saṃvatsara changes "
+        "(date; day before next row’s date)."
+    )
+    parser.add_argument(
+        "start_date",
+        help="Start date DD-MM-YYYY; scan forward until the saṃvatsara index "
+        "differs from this day’s value.",
+    )
+    parser.add_argument(
+        "--city",
+        default="Mumbai",
+        help="City from cities.json (default: Mumbai).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        help="Write CSV to this file instead of stdout.",
+    )
     args = parser.parse_args()
 
-    xlat = to_itrans if args.itrans else lambda x: x
+    _, cities = load_data()
+    _, city_info = resolve_city(args.city, cities)
+    start = parse_date(args.start_date)
+    tz_offset = compute_tz_offset(city_info, start)
+    place = Place(city_info["latitude"], city_info["longitude"], tz_offset)
 
-    names, cities = load_data()
-    city_name, city_info = resolve_city(args.city, cities)
-    from_date = parse_date(args.from_date)
-    to_date = parse_date(args.to_date)
+    start_sv = None
+    prathamas = []
 
-    fields = ["date", "samvatsara", "masa", "rtu",
-              "tithi", "nakshatra", "yoga", "karana"]
-    writer = csv.DictWriter(sys.stdout, fieldnames=fields)
-    writer.writeheader()
+    d = start
+    max_days = 450
+    for _ in range(max_days):
+        jd = gregorian_to_jd(d)
+        mas = masa(jd, place)
+        sv = samvatsara(jd, mas[0])
+        if start_sv is None:
+            start_sv = sv
+        elif sv != start_sv:
+            break
 
-    d = datetime(from_date.year, from_date.month, from_date.day)
-    end = datetime(to_date.year, to_date.month, to_date.day)
+        ti = tithi(jd, place)[0]
+        if ti == 1:
+            prathamas.append(d)
 
-    while d <= end:
-        date = Date(d.year, d.month, d.day)
-        tz_offset = compute_tz_offset(city_info, date)
-        place = Place(city_info['latitude'], city_info['longitude'], tz_offset)
-        jd = gregorian_to_jd(date)
-        ti = tithi(jd, place)
+        d = date_add_one(d)
+    else:
+        print(
+            f"Stopped after {max_days} days without saṃvatsara change; "
+            "extend max_days if needed.",
+            file=sys.stderr,
+        )
 
-        is_match = (ti[0] == SHUKLA_PRATHAMA or
-                    (len(ti) == 4 and ti[2] == SHUKLA_PRATHAMA))
-
-        if is_match:
-            mas = masa(jd, place)
-            nak = nakshatra(jd, place)
-            yog = yoga(jd, place)
-            kar = karana(jd, place)
-
-            masa_name = names["masas"][str(mas[0])]
-            if mas[1]:
-                masa_name = "Adhika " + masa_name
-            rtu_name = names["ritus"][str(ritu(mas[0]))]
-            samvat_name = names["samvats"][str(samvatsara(jd, mas[0]))]
-
-            date_str = f"{d.day:02d}-{d.month:02d}-{d.year:04d}"
-            writer.writerow({
-                "date": date_str,
-                "samvatsara": xlat(samvat_name),
-                "masa": xlat(masa_name),
-                "rtu": xlat(rtu_name),
-                "tithi": xlat(names["tithis"][str(SHUKLA_PRATHAMA)]),
-                "nakshatra": xlat(names["nakshatras"][str(nak[0])]),
-                "yoga": xlat(names["yogas"][str(yog[0])]),
-                "karana": xlat(names["karanas"][str(kar[0])]),
-            })
-            print(f"  {date_str}  {xlat(masa_name)}", file=sys.stderr)
-
-        d += timedelta(days=1)
+    fields = ["date", "day_before_next"]
+    out = open(args.output, "w", newline="", encoding="utf-8") if args.output else sys.stdout
+    try:
+        writer = csv.DictWriter(out, fieldnames=fields)
+        writer.writeheader()
+        n = len(prathamas)
+        for i, day in enumerate(prathamas):
+            if i + 1 < n:
+                before_next = fmt_date(date_sub_one(prathamas[i + 1]))
+            else:
+                before_next = ""
+            writer.writerow({"date": fmt_date(day), "day_before_next": before_next})
+    finally:
+        if args.output:
+            out.close()
 
 
 if __name__ == "__main__":
