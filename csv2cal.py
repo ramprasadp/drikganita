@@ -9,7 +9,7 @@ from datetime import datetime
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -88,37 +88,74 @@ def is_highlight(row):
     return False
 
 
-def make_cell(row, available_cols, styles, short_naks):
+def make_cell(row, available_cols, styles, short_naks, inner_cell_w):
+    """inner_cell_w: usable width inside the cell (points) for nested tables."""
     day = row["_dt"].day
     red = is_highlight(row)
     sfx = "_red" if red else ""
 
-    date_line = f'<b>{day}</b>'
-    parts = [Paragraph(date_line, styles["date" + sfx])]
+    date_para = Paragraph(f"<b>{day}</b>", styles["date" + sfx])
 
     tnum = row.get("tithi_num", "")
     stnum = row.get("shraddha_tithi_num", "")
-    if tnum or stnum:
-        line2 = f"<b>{escape(tnum)}</b> / {escape(stnum)}"
-        parts.append(Paragraph(line2, styles["row2" + sfx]))
+    tithi_lines = []
+    if tnum:
+        tithi_lines.append(Paragraph(f"<b>{escape(tnum)}</b>", styles["tithi_stack" + sfx]))
+    if stnum:
+        tithi_lines.append(Paragraph(escape(stnum), styles["tithi_stack" + sfx]))
 
-    nak = row.get("nakshatra", "")
-    if nak:
-        parts.append(Paragraph(escape(shorten_nak(nak, short_naks)), styles["row3" + sfx]))
-
-    yoga = row.get("yoga", "")
-    karana_val = row.get("karana", "")
-    if yoga or karana_val:
-        left = Paragraph(escape(yoga), styles["row3" + sfx]) if yoga else Paragraph("", styles["row3" + sfx])
-        right = Paragraph(escape(karana_val), styles["row3r" + sfx]) if karana_val else Paragraph("", styles["row3r" + sfx])
-        inner = Table([[left, right]], colWidths=["50%", "50%"])
-        inner.setStyle(TableStyle([
+    if tithi_lines:
+        tithi_col_w = max(inner_cell_w * 0.52, 1)
+        tithi_stack = Table([[ln] for ln in tithi_lines], colWidths=[tithi_col_w])
+        tithi_stack.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
             ("RIGHTPADDING", (0, 0), (-1, -1), 0),
             ("TOPPADDING", (0, 0), (-1, -1), 0),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
         ]))
-        parts.append(inner)
+        top_w = max(inner_cell_w * 0.48, 1)
+        top_row = Table([[date_para, tithi_stack]], colWidths=[top_w, tithi_col_w])
+        top_row.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+        ]))
+        parts = [top_row]
+    else:
+        parts = [date_para]
+
+    nak = row.get("nakshatra", "")
+    if nak:
+        parts.append(
+            Paragraph(escape(shorten_nak(nak, short_naks)), styles["nak_mid" + sfx]))
+
+    yoga = row.get("yoga", "")
+    karana_val = row.get("karana", "")
+    if yoga or karana_val:
+        half = max(inner_cell_w * 0.5, 1)
+        left = (
+            Paragraph(escape(yoga), styles["row3" + sfx])
+            if yoga
+            else Paragraph("", styles["row3" + sfx])
+        )
+        right = (
+            Paragraph(escape(karana_val), styles["row3_kar" + sfx])
+            if karana_val
+            else Paragraph("", styles["row3_kar" + sfx])
+        )
+        yk = Table([[left, right]], colWidths=[half, half])
+        yk.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        parts.append(yk)
 
     return parts
 
@@ -142,32 +179,36 @@ def generate_pdf(csv_file, output_file):
     n_weeks = len(weeks)
 
     red = colors.HexColor("#cc0000")
+    grey = colors.HexColor("#555555")
     styles = {
-        "date": ParagraphStyle("date", fontName=font_bold, fontSize=14, leading=16),
-        "date_red": ParagraphStyle("date_red", fontName=font_bold, fontSize=14, leading=16,
-                                   textColor=red),
-        "row2": ParagraphStyle("row2", fontName=font, fontSize=7, leading=9,
-                               textColor=colors.HexColor("#333333")),
-        "row2_red": ParagraphStyle("row2_red", fontName=font, fontSize=7, leading=9,
-                                   textColor=red),
-        "row3": ParagraphStyle("row3", fontName=font, fontSize=5.5, leading=7,
-                               textColor=colors.HexColor("#555555")),
-        "row3_red": ParagraphStyle("row3_red", fontName=font, fontSize=5.5, leading=7,
-                                   textColor=red),
-        "row3r": ParagraphStyle("row3r", fontName=font, fontSize=5.5, leading=7,
-                                textColor=colors.HexColor("#555555"), alignment=2),
-        "row3r_red": ParagraphStyle("row3r_red", fontName=font, fontSize=5.5, leading=7,
-                                    textColor=red, alignment=2),
+        "date": ParagraphStyle("date", fontName=font_bold, fontSize=18, leading=20,
+                               alignment=0),
+        "date_red": ParagraphStyle("date_red", fontName=font_bold, fontSize=18, leading=20,
+                                   textColor=red, alignment=0),
+        "tithi_stack": ParagraphStyle(
+            "tithi_stack", fontName=font, fontSize=9, leading=11,
+            textColor=colors.HexColor("#333333"), alignment=2),
+        "tithi_stack_red": ParagraphStyle(
+            "tithi_stack_red", fontName=font, fontSize=9, leading=11,
+            textColor=red, alignment=2),
+        "nak_mid": ParagraphStyle("nak_mid", fontName=font, fontSize=6, leading=7.5,
+                                  textColor=grey, alignment=1),
+        "nak_mid_red": ParagraphStyle("nak_mid_red", fontName=font, fontSize=6, leading=7.5,
+                                      textColor=red, alignment=1),
+        "row3": ParagraphStyle("row3", fontName=font, fontSize=6, leading=7.5,
+                               textColor=grey, alignment=0),
+        "row3_red": ParagraphStyle("row3_red", fontName=font, fontSize=6, leading=7.5,
+                                   textColor=red, alignment=0),
+        "row3_kar": ParagraphStyle("row3_kar", fontName=font, fontSize=6, leading=7.5,
+                                   textColor=grey, alignment=2),
+        "row3_kar_red": ParagraphStyle("row3_kar_red", fontName=font, fontSize=6, leading=7.5,
+                                       textColor=red, alignment=2),
         "hdr":  ParagraphStyle("hdr", fontName=font_bold, fontSize=7.5, leading=10,
                                alignment=1, textColor=colors.white),
         "day":  ParagraphStyle("day", fontName=font_bold, fontSize=9, leading=11,
                                alignment=1, textColor=colors.white),
-        "title": ParagraphStyle("title", fontName=font_bold, fontSize=14,
-                                leading=18, alignment=1),
         "sub":  ParagraphStyle("sub", fontName=font, fontSize=9, leading=12,
                                alignment=1, textColor=colors.HexColor("#555555")),
-        "legend": ParagraphStyle("legend", fontName=font, fontSize=6.5, leading=9,
-                                 textColor=colors.HexColor("#666666"), alignment=1),
     }
     empty = Paragraph("", styles["row3"])
 
@@ -179,13 +220,22 @@ def generate_pdf(csv_file, output_file):
         d1 = week[days[-1]]["_dt"].strftime("%d %b")
         header.append(Paragraph(f"{d0} – {d1}", styles["hdr"]))
 
+    # Layout: portrait A4 — inner width for cell content (after table cell padding)
+    page_w = A4[0]
+    margin = 12 * mm
+    usable = page_w - 2 * margin
+    day_col = 24 * mm
+    week_col = (usable - day_col) / n_weeks
+    inner_cell_w = week_col - 7  # ~4pt left + ~3pt right padding
+
     krishna_cells = []
     data = [header]
     for wd in range(7):
         row_data = [Paragraph(DAY_NAMES[wd], styles["day"])]
         for wi, week in enumerate(weeks):
             if wd in week:
-                row_data.append(make_cell(week[wd], available_cols, styles, short_naks))
+                row_data.append(
+                    make_cell(week[wd], available_cols, styles, short_naks, inner_cell_w))
                 paksha = week[wd].get("paksha", "")
                 if paksha in ("KRiShNa", "Kṛṣṇa"):
                     krishna_cells.append((wi + 1, wd + 1))
@@ -193,12 +243,6 @@ def generate_pdf(csv_file, output_file):
                 row_data.append(empty)
         data.append(row_data)
 
-    # Layout
-    page_w = landscape(A4)[0]
-    margin = 12 * mm
-    usable = page_w - 2 * margin
-    day_col = 24 * mm
-    week_col = (usable - day_col) / n_weeks
     col_widths = [day_col] + [week_col] * n_weeks
 
     table = Table(data, colWidths=col_widths, repeatRows=1)
@@ -225,7 +269,7 @@ def generate_pdf(csv_file, output_file):
 
     table.setStyle(TableStyle(cmds))
 
-    # Title & subtitle
+    # Subtitle (samvatsara, rtu, masa, date range)
     first, last = rows[0], rows[-1]
     date_range = (f"{first['_dt'].strftime('%d %b %Y')}"
                   f" – {last['_dt'].strftime('%d %b %Y')}")
@@ -240,18 +284,11 @@ def generate_pdf(csv_file, output_file):
     parts.append(date_range)
     sub_text = escape("  |  ".join(parts))
 
-    legend_text = ("Grey cells = Krishna paksha    "
-                   "Row 2: Tithi / Shraddha Tithi    "
-                   "Row 3: Nakshatra  Yoga  Karana")
-
-    doc = SimpleDocTemplate(output_file, pagesize=landscape(A4),
+    doc = SimpleDocTemplate(output_file, pagesize=A4,
                             leftMargin=margin, rightMargin=margin,
                             topMargin=8 * mm, bottomMargin=8 * mm)
     elements = [
-        Paragraph("Pañcāṅga", styles["title"]),
         Paragraph(sub_text, styles["sub"]),
-        Spacer(1, 2 * mm),
-        Paragraph(legend_text, styles["legend"]),
         Spacer(1, 2 * mm),
         table,
     ]

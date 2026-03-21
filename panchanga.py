@@ -256,12 +256,11 @@ def yoga(jd, place):
 def karana(jd, place):
   """Returns the karana and their ending times. (from 1 to 60)"""
   # 1. Find time of sunrise
-  rise = sunrise(jd, place)[0]
+  tz = place.timezone
+  rise = sunrise(jd, place)[0] - tz / 24
 
   # 2. Find karana at this JDN
-  solar_long = solar_longitude(rise)
-  lunar_long = lunar_longitude(rise)
-  moon_phase = (lunar_long - solar_long) % 360
+  moon_phase = lunar_phase(rise)
   today = ceil(moon_phase / 6)
   degrees_left = today * 6 - moon_phase
 
